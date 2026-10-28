@@ -18,8 +18,13 @@
  */
 package org.apache.iceberg.parquet;
 
+import static org.apache.iceberg.types.Types.NestedField.optional;
+import static org.assertj.core.api.Assertions.assertThat;
+
 import java.io.File;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Map;
 import java.util.UUID;
 import org.apache.iceberg.FileFormat;
@@ -30,14 +35,19 @@ import org.apache.iceberg.ParameterizedTestExtension;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.TestMetrics;
+import org.apache.iceberg.data.GenericRecord;
 import org.apache.iceberg.data.Record;
 import org.apache.iceberg.data.parquet.GenericParquetWriter;
+import org.apache.iceberg.geospatial.GeospatialBound;
 import org.apache.iceberg.io.FileAppender;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.types.Conversions;
+import org.apache.iceberg.types.Types;
 import org.apache.parquet.hadoop.ParquetFileReader;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 
 /** Test Metrics for Parquet. */
@@ -45,6 +55,47 @@ import org.junit.jupiter.api.extension.ExtendWith;
 public class TestParquetMetrics extends TestMetrics {
   private static final Map<String, String> SMALL_ROW_GROUP_CONFIG =
       ImmutableMap.of(TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES, "1600");
+
+  @Test
+  void geometryMetricsIncludeOptionalBounds() throws IOException {
+    Types.GeometryType geometryType = Types.GeometryType.crs84();
+    Schema schema =
+        new Schema(optional(1, "geom_m", geometryType), optional(2, "geom_zm", geometryType));
+    Record first = GenericRecord.create(schema);
+    first.setField("geom_m", wkbPoint(2001, 1, 2, 7));
+    first.setField("geom_zm", wkbPoint(3001, 1, 2, 100, 10));
+    Record second = GenericRecord.create(schema);
+    second.setField("geom_m", wkbPoint(2001, 3, 4, -2));
+    second.setField("geom_zm", wkbPoint(3001, 3, 4, -50, 20));
+
+    Metrics metrics = getMetrics(schema, first, second, GenericRecord.create(schema));
+
+    assertThat(
+            Conversions.<GeospatialBound>fromByteBuffer(geometryType, metrics.lowerBounds().get(1)))
+        .isEqualTo(GeospatialBound.createXYM(1, 2, -2));
+    assertThat(
+            Conversions.<GeospatialBound>fromByteBuffer(geometryType, metrics.upperBounds().get(1)))
+        .isEqualTo(GeospatialBound.createXYM(3, 4, 7));
+    assertThat(
+            Conversions.<GeospatialBound>fromByteBuffer(geometryType, metrics.lowerBounds().get(2)))
+        .isEqualTo(GeospatialBound.createXYZM(1, 2, -50, 10));
+    assertThat(
+            Conversions.<GeospatialBound>fromByteBuffer(geometryType, metrics.upperBounds().get(2)))
+        .isEqualTo(GeospatialBound.createXYZM(3, 4, 100, 20));
+  }
+
+  private static ByteBuffer wkbPoint(int typeCode, double... coordinates) {
+    ByteBuffer buffer =
+        ByteBuffer.allocate(Byte.BYTES + Integer.BYTES + coordinates.length * Double.BYTES)
+            .order(ByteOrder.LITTLE_ENDIAN);
+    buffer.put((byte) 1);
+    buffer.putInt(typeCode);
+    for (double coordinate : coordinates) {
+      buffer.putDouble(coordinate);
+    }
+
+    return buffer.flip();
+  }
 
   @Override
   public FileFormat fileFormat() {
