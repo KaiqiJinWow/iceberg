@@ -113,8 +113,8 @@ class TestGeometryBoundsBuilder {
   }
 
   @ParameterizedTest(name = "{0}")
-  @MethodSource("extraDimensionCases")
-  void extraDimensionsAreIgnored(String description, Geom geom, BoundingBox expected) {
+  @MethodSource("optionalDimensionCases")
+  void optionalDimensionBounds(String description, Geom geom, BoundingBox expected) {
     GeometryBoundsBuilder bounds = new GeometryBoundsBuilder();
 
     bounds.addValue(ByteBuffer.wrap(wkb(geom)));
@@ -125,20 +125,44 @@ class TestGeometryBoundsBuilder {
   @Test
   void boundsAcrossValuesWithDifferentDimensions() {
     GeometryBoundsBuilder bounds = new GeometryBoundsBuilder();
-    bounds.addValue(ByteBuffer.wrap(wkb(pointZ(1, 2, 3))));
-    bounds.addValue(ByteBuffer.wrap(wkb(pointZM(1, 2, 3, 4))));
+    bounds.addValue(ByteBuffer.wrap(wkb(pointZ(1, 2, 100))));
+    bounds.addValue(ByteBuffer.wrap(wkb(pointM(3, 4, 7))));
+    bounds.addValue(ByteBuffer.wrap(wkb(point(-5, 8))));
+    bounds.addValue(ByteBuffer.wrap(wkb(pointZM(2, -1, 50, 20))));
 
-    assertThat(bounds.build()).isEqualTo(box(1, 2, 1, 2));
+    assertThat(bounds.build())
+        .isEqualTo(
+            new BoundingBox(
+                GeospatialBound.createXYZM(-5, -1, 50, 7),
+                GeospatialBound.createXYZM(3, 8, 100, 20)));
   }
 
   @Test
-  void extraDimensionsNestedInCollectionAreIgnored() {
+  void boundsAcrossValuesWithMissingOptionalCoordinates() {
     GeometryBoundsBuilder bounds = new GeometryBoundsBuilder();
-    // a 3D collection holding 3D children (dimensions must match the parent): each child's Z is
-    // read past, so only XY bounds the box
-    bounds.addValue(ByteBuffer.wrap(wkb(collectionZ(pointZ(1, 2, 9), pointZ(3, 4, 9)))));
+    bounds.addValue(ByteBuffer.wrap(wkb(pointZM(1, Double.NaN, Double.NaN, 4))));
+    bounds.addValue(ByteBuffer.wrap(wkb(pointZM(Double.NaN, 2, 3, Double.NaN))));
 
-    assertThat(bounds.build()).isEqualTo(box(1, 2, 3, 4));
+    GeospatialBound expected = GeospatialBound.createXYZM(1, 2, 3, 4);
+    assertThat(bounds.build()).isEqualTo(new BoundingBox(expected, expected));
+  }
+
+  @Test
+  void optionalDimensionsInNestedCollection() {
+    GeometryBoundsBuilder bounds = new GeometryBoundsBuilder();
+    bounds.addValue(
+        ByteBuffer.wrap(
+            wkb(
+                collectionOf(
+                    BE,
+                    3007,
+                    pointZM(1, 2, 9, 40),
+                    collectionOf(LE, 3004, geom(BE, 3001, coordinates(3, 4, -5, 60)))))));
+
+    assertThat(bounds.build())
+        .isEqualTo(
+            new BoundingBox(
+                GeospatialBound.createXYZM(1, 2, -5, 40), GeospatialBound.createXYZM(3, 4, 9, 60)));
   }
 
   @ParameterizedTest(name = "{0}")
@@ -194,7 +218,27 @@ class TestGeometryBoundsBuilder {
     // even though its first and last Z differ
     bounds.addValue(ByteBuffer.wrap(wkb(polygonZ(ring(0, 0, 0, 1, 0, 1, 1, 1, 2, 0, 0, 9)))));
 
-    assertThat(bounds.build()).isEqualTo(box(0, 0, 1, 1));
+    assertThat(bounds.build())
+        .isEqualTo(
+            new BoundingBox(
+                GeospatialBound.createXYZ(0, 0, 0), GeospatialBound.createXYZ(1, 1, 9)));
+  }
+
+  @Test
+  void polygonOptionalBoundsIncludeClosingVerticesAndInteriorRings() {
+    GeometryBoundsBuilder bounds = new GeometryBoundsBuilder();
+    bounds.addValue(
+        ByteBuffer.wrap(
+            wkb(
+                polygonZM(
+                    ring(0, 0, -100, 5, 10, 0, 4, -20, 0, 10, 8, 7, 0, 0, 6, 100),
+                    ring(1, 1, 3, -50, 1, 2, 200, 10, 2, 1, 5, 15, 1, 1, 3, 20)))));
+
+    assertThat(bounds.build())
+        .isEqualTo(
+            new BoundingBox(
+                GeospatialBound.createXYZM(0, 0, -100, -50),
+                GeospatialBound.createXYZM(10, 10, 200, 100)));
   }
 
   @Test
@@ -280,13 +324,53 @@ class TestGeometryBoundsBuilder {
             box(1, 2, 1, 2)));
   }
 
-  private static Stream<Arguments> extraDimensionCases() {
+  private static Stream<Arguments> optionalDimensionCases() {
     return Stream.of(
-        Arguments.of("POINT Z(1 2 3)", pointZ(1, 2, 3), box(1, 2, 1, 2)),
-        Arguments.of("POINT M(1 2 3)", pointM(1, 2, 3), box(1, 2, 1, 2)),
-        Arguments.of("POINT ZM(1 2 3 4)", pointZM(1, 2, 3, 4), box(1, 2, 1, 2)),
         Arguments.of(
-            "LINESTRING Z(0 1 9,2 -1 9)", lineStringZ(0, 1, 9, 2, -1, 9), box(0, -1, 2, 1)));
+            "POINT Z(1 2 3)",
+            pointZ(1, 2, 3),
+            new BoundingBox(
+                GeospatialBound.createXYZ(1, 2, 3), GeospatialBound.createXYZ(1, 2, 3))),
+        Arguments.of(
+            "POINT M(1 2 30)",
+            pointM(1, 2, 30),
+            new BoundingBox(
+                GeospatialBound.createXYM(1, 2, 30), GeospatialBound.createXYM(1, 2, 30))),
+        Arguments.of(
+            "POINT ZM(1 2 3 40)",
+            pointZM(1, 2, 3, 40),
+            new BoundingBox(
+                GeospatialBound.createXYZM(1, 2, 3, 40), GeospatialBound.createXYZM(1, 2, 3, 40))),
+        Arguments.of(
+            "LINESTRING Z(0 1 9,2 -1 -5)",
+            lineStringZ(0, 1, 9, 2, -1, -5),
+            new BoundingBox(
+                GeospatialBound.createXYZ(0, -1, -5), GeospatialBound.createXYZ(2, 1, 9))),
+        Arguments.of("POINT Z(1 2 NaN)", pointZ(1, 2, Double.NaN), box(1, 2, 1, 2)),
+        Arguments.of("POINT M(1 2 NaN)", pointM(1, 2, Double.NaN), box(1, 2, 1, 2)),
+        Arguments.of(
+            "POINT ZM(1 2 NaN NaN)", pointZM(1, 2, Double.NaN, Double.NaN), box(1, 2, 1, 2)),
+        Arguments.of(
+            "POINT ZM(1 2 NaN 40)",
+            pointZM(1, 2, Double.NaN, 40),
+            new BoundingBox(
+                GeospatialBound.createXYM(1, 2, 40), GeospatialBound.createXYM(1, 2, 40))),
+        Arguments.of(
+            "POINT ZM(1 2 3 NaN)",
+            pointZM(1, 2, 3, Double.NaN),
+            new BoundingBox(
+                GeospatialBound.createXYZ(1, 2, 3), GeospatialBound.createXYZ(1, 2, 3))),
+        Arguments.of("POINT ZM(1 NaN 3 40)", pointZM(1, Double.NaN, 3, 40), null),
+        Arguments.of(
+            "POINT ZM EMPTY", pointZM(Double.NaN, Double.NaN, Double.NaN, Double.NaN), null),
+        Arguments.of(
+            "POINT ZM(1 2 Infinity -Infinity)",
+            pointZM(1, 2, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY),
+            new BoundingBox(
+                GeospatialBound.createXYZM(
+                    1, 2, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY),
+                GeospatialBound.createXYZM(
+                    1, 2, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY))));
   }
 
   private static Stream<Arguments> unboundableWkbCases() {
@@ -302,6 +386,7 @@ class TestGeometryBoundsBuilder {
         Arguments.of("invalid byte order", withByteOrder((byte) 2, wkb(point(0, 0)))),
         // a point header with its coordinates cut off
         Arguments.of("truncated point", truncate(wkb(point(1, 2)), 5)),
+        Arguments.of("truncated XYZM point", truncate(wkb(pointZM(1, 2, 3, 4)), 29)),
         // a line string that declares far more points than the buffer could hold
         Arguments.of(
             "element count exceeds remaining bytes",
@@ -323,6 +408,7 @@ class TestGeometryBoundsBuilder {
         Arguments.of("multi point z with a 2D child", wkb(collectionOf(LE, 1004, point(1, 2)))),
         Arguments.of(
             "geometry collection z with a 2D child", wkb(collectionOf(LE, 1007, point(1, 2)))),
+        Arguments.of("geometry collection z with an XYM child", wkb(collectionZ(pointM(1, 2, 3)))),
         // a polygon ring that does not close, and one with fewer than four points
         Arguments.of("polygon ring not closed", wkb(polygon(ring(0, 0, 1, 0, 0, 1, 1, 1)))),
         Arguments.of("polygon ring with too few points", wkb(polygon(ring(0, 0, 1, 0, 0, 0)))));
@@ -435,6 +521,18 @@ class TestGeometryBoundsBuilder {
           buffer.putInt(rings.length);
           for (double[] ring : rings) {
             sequence(3, ring).writeTo(buffer);
+          }
+        });
+  }
+
+  private static Geom polygonZM(double[]... rings) {
+    return geom(
+        LE,
+        3003,
+        buffer -> {
+          buffer.putInt(rings.length);
+          for (double[] ring : rings) {
+            sequence(4, ring).writeTo(buffer);
           }
         });
   }

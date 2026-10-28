@@ -28,10 +28,10 @@ import org.apache.iceberg.types.Type;
  *
  * <p>The Parquet footer's lexicographic min/max over the WKB bytes is not meaningful for spatial
  * values, so the writer instead scans each value's coordinates with a {@link GeometryBoundsBuilder}
- * and accumulates a two-dimensional bounding box. The resulting {@link FieldMetrics} carries the
- * box's lower and upper corners as {@link GeospatialBound} points, which serialize through the
- * existing geometry conversion path. The null value count is left at zero here; it is reconciled by
- * the optional-field writer that owns null accounting.
+ * and accumulates a bounding box. The resulting {@link FieldMetrics} carries the box's lower and
+ * upper corners as {@link GeospatialBound} points, which serialize through the existing geometry
+ * conversion path. The null value count is left at zero here; it is reconciled by the
+ * optional-field writer that owns null accounting.
  *
  * <p>The total bytes of non-null WKB values is also tracked, matching the {@code total_bytes}
  * metric that the counts-only geospatial writer produces, so adding bounds does not drop that
@@ -68,7 +68,7 @@ public class GeometryFieldMetrics extends FieldMetrics<GeospatialBound> {
     }
 
     public GeometryFieldMetrics build() {
-      // build() returns null bounds when a dimension has no value or a value could not be bounded,
+      // build() returns null bounds when X or Y has no value or a value could not be bounded,
       // which leaves the field with counts but no bounds. The total bytes are still reported
       // and do not depend on whether a box could be formed.
       BoundingBox box = boundsBuilder.build();

@@ -31,22 +31,17 @@ import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
  * <p>The seven OGC geometry types are supported: point, line string, polygon, multi point, multi
  * line string, multi polygon, and geometry collection.
  *
- * <p>Coordinates are tracked independently for the X and Y dimensions. A {@code NaN} ordinate marks
- * an empty value and does not contribute to its dimension; an infinite ordinate is a real position
- * and is kept as a bound, since the spec forbids only NaN as a lower or upper bound. No bounds are
- * produced unless both dimensions are present.
+ * <p>Coordinates are tracked independently for X, Y, and the optional Z and M dimensions. A {@code
+ * NaN} ordinate marks an empty value and does not contribute to its dimension; an infinite ordinate
+ * is a real position and is kept as a bound. No bounds are produced unless both X and Y are
+ * present.
  *
  * <p>These bounds apply to {@code geometry} columns, whose edges are always interpolated linearly,
  * so a box that contains every vertex contains the whole geometry. They are not valid for {@code
  * geography} columns: geodesic edges can reach beyond their endpoints, longitude is periodic, and a
  * geography box may cross the antimeridian.
  *
- * <p>Only X and Y bounds are produced. The spec also defines optional Z and M bounds, but producing
- * them is a deliberate non-goal here: any Z and M ordinates in a value are read past rather than
- * bounded, so an XYZ or XYZM value still parses and contributes its X and Y.
- *
- * <p>Every ring of a polygon, including interior rings, contributes to the bounds. In a valid
- * polygon the holes lie inside the shell, so this is the shell's own box.
+ * <p>Every ring of a polygon, including interior rings, contributes to the bounds.
  */
 class GeometryBoundsBuilder {
 
@@ -71,6 +66,8 @@ class GeometryBoundsBuilder {
 
   private final DimensionBounds xBounds = new DimensionBounds();
   private final DimensionBounds yBounds = new DimensionBounds();
+  private final DimensionBounds zBounds = new DimensionBounds();
+  private final DimensionBounds mBounds = new DimensionBounds();
   // set when a value could not be fully bounded -- malformed or unsupported WKB, or bytes left
   // after the declared geometry -- so an object may be missing from the box; build() then
   // suppresses the bounds
@@ -122,8 +119,26 @@ class GeometryBoundsBuilder {
       return null;
     }
 
-    GeospatialBound min = GeospatialBound.createXY(xBounds.lower(), yBounds.lower());
-    GeospatialBound max = GeospatialBound.createXY(xBounds.upper(), yBounds.upper());
+    GeospatialBound min;
+    GeospatialBound max;
+    if (zBounds.hasValue() && mBounds.hasValue()) {
+      min =
+          GeospatialBound.createXYZM(
+              xBounds.lower(), yBounds.lower(), zBounds.lower(), mBounds.lower());
+      max =
+          GeospatialBound.createXYZM(
+              xBounds.upper(), yBounds.upper(), zBounds.upper(), mBounds.upper());
+    } else if (zBounds.hasValue()) {
+      min = GeospatialBound.createXYZ(xBounds.lower(), yBounds.lower(), zBounds.lower());
+      max = GeospatialBound.createXYZ(xBounds.upper(), yBounds.upper(), zBounds.upper());
+    } else if (mBounds.hasValue()) {
+      min = GeospatialBound.createXYM(xBounds.lower(), yBounds.lower(), mBounds.lower());
+      max = GeospatialBound.createXYM(xBounds.upper(), yBounds.upper(), mBounds.upper());
+    } else {
+      min = GeospatialBound.createXY(xBounds.lower(), yBounds.lower());
+      max = GeospatialBound.createXY(xBounds.upper(), yBounds.upper());
+    }
+
     return new BoundingBox(min, max);
   }
 
@@ -181,14 +196,12 @@ class GeometryBoundsBuilder {
               + dimensionName(dimensionGroup));
     }
 
-    int numDimensions = numDimensions(dimensionGroup);
-
     // checkWkb above already constrained geometryType to the seven OGC types, so no default arm
     // is reachable here
     switch (geometryType) {
-      case TYPE_POINT -> readCoordinate(buffer, numDimensions);
-      case TYPE_LINE_STRING -> readCoordinateSequence(buffer, numDimensions);
-      case TYPE_POLYGON -> readPolygon(buffer, numDimensions);
+      case TYPE_POINT -> readCoordinate(buffer, dimensionGroup);
+      case TYPE_LINE_STRING -> readCoordinateSequence(buffer, dimensionGroup);
+      case TYPE_POLYGON -> readPolygon(buffer, dimensionGroup);
       case TYPE_MULTI_POINT -> readCollection(buffer, TYPE_POINT, dimensionGroup);
       case TYPE_MULTI_LINE_STRING -> readCollection(buffer, TYPE_LINE_STRING, dimensionGroup);
       case TYPE_MULTI_POLYGON -> readCollection(buffer, TYPE_POLYGON, dimensionGroup);
@@ -232,12 +245,12 @@ class GeometryBoundsBuilder {
   //   | # rings  | ring 0, ring 1, ...   |
   //   | (4 B)    | (each a point seq)    |
   //   +----------+-----------------------+
-  private void readPolygon(ByteBuffer buffer, int numDimensions) {
+  private void readPolygon(ByteBuffer buffer, int dimensionGroup) {
     // read every ring, interior rings included: they must be consumed to reach the end of the
     // polygon anyway, and folding their coordinates in can only widen the box, never under-cover it
     int numRings = readCount(buffer);
     for (int i = 0; i < numRings; i += 1) {
-      readRing(buffer, numDimensions);
+      readRing(buffer, dimensionGroup);
     }
   }
 
@@ -247,9 +260,9 @@ class GeometryBoundsBuilder {
   //   | # points | coord 0 .. coord n-1  |
   //   | (4 B)    | (n coordinates)       |
   //   +----------+-----------------------+
-  private void readRing(ByteBuffer buffer, int numDimensions) {
+  private void readRing(ByteBuffer buffer, int dimensionGroup) {
     int numPoints = readCount(buffer);
-    checkRemaining(buffer, (long) numPoints * numDimensions * Double.BYTES);
+    checkRemaining(buffer, (long) numPoints * numDimensions(dimensionGroup) * Double.BYTES);
     if (numPoints == 0) {
       return;
     }
@@ -265,17 +278,17 @@ class GeometryBoundsBuilder {
     // pairs with == rather than the whole coordinate. Every vertex still folds into the bounds.
     double firstX = buffer.getDouble();
     double firstY = buffer.getDouble();
-    skipExtraOrdinates(buffer, numDimensions);
+    readExtraOrdinates(buffer, dimensionGroup);
     xBounds.add(firstX);
     yBounds.add(firstY);
 
     for (int i = 1; i < numPoints - 1; i += 1) {
-      readCoordinate(buffer, numDimensions);
+      readCoordinate(buffer, dimensionGroup);
     }
 
     double lastX = buffer.getDouble();
     double lastY = buffer.getDouble();
-    skipExtraOrdinates(buffer, numDimensions);
+    readExtraOrdinates(buffer, dimensionGroup);
     xBounds.add(lastX);
     yBounds.add(lastY);
 
@@ -301,33 +314,36 @@ class GeometryBoundsBuilder {
   //   | # points | coord 0 .. coord n-1  |
   //   | (4 B)    | (n coordinates)       |
   //   +----------+-----------------------+
-  private void readCoordinateSequence(ByteBuffer buffer, int numDimensions) {
+  private void readCoordinateSequence(ByteBuffer buffer, int dimensionGroup) {
     int numPoints = readCount(buffer);
-    long numBytes = (long) numPoints * numDimensions * Double.BYTES;
+    long numBytes = (long) numPoints * numDimensions(dimensionGroup) * Double.BYTES;
     checkRemaining(buffer, numBytes);
     for (int i = 0; i < numPoints; i += 1) {
-      readCoordinate(buffer, numDimensions);
+      readCoordinate(buffer, dimensionGroup);
     }
   }
 
-  // one coordinate; only X and Y bound the box, any Z and M are read past:
+  // one coordinate, with optional Z and M ordinates:
   //   +-------+-------+-------+-------+
   //   |   X   |   Y   |  [Z]  |  [M]  |
   //   | (8 B) | (8 B) | (8 B) | (8 B) |
   //   +-------+-------+-------+-------+
-  private void readCoordinate(ByteBuffer buffer, int numDimensions) {
-    checkRemaining(buffer, (long) numDimensions * Double.BYTES);
+  private void readCoordinate(ByteBuffer buffer, int dimensionGroup) {
+    checkRemaining(buffer, (long) numDimensions(dimensionGroup) * Double.BYTES);
     double xCoord = buffer.getDouble();
     double yCoord = buffer.getDouble();
-    skipExtraOrdinates(buffer, numDimensions);
+    readExtraOrdinates(buffer, dimensionGroup);
     xBounds.add(xCoord);
     yBounds.add(yCoord);
   }
 
-  // skip any Z and M ordinates that follow X and Y; only X and Y contribute to the box
-  private static void skipExtraOrdinates(ByteBuffer buffer, int numDimensions) {
-    for (int i = 2; i < numDimensions; i += 1) {
-      buffer.getDouble();
+  private void readExtraOrdinates(ByteBuffer buffer, int dimensionGroup) {
+    if (dimensionGroup == XYZ_GROUP || dimensionGroup == XYZM_GROUP) {
+      zBounds.add(buffer.getDouble());
+    }
+
+    if (dimensionGroup == XYM_GROUP || dimensionGroup == XYZM_GROUP) {
+      mBounds.add(buffer.getDouble());
     }
   }
 
