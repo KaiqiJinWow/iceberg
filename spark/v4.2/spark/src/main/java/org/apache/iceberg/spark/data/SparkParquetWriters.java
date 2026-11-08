@@ -30,9 +30,9 @@ import java.util.UUID;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 import org.apache.iceberg.FieldMetrics;
+import org.apache.iceberg.GeographyFieldMetrics;
 import org.apache.iceberg.GeometryFieldMetrics;
 import org.apache.iceberg.Schema;
-import org.apache.iceberg.ValueSizeFieldMetrics;
 import org.apache.iceberg.parquet.ParquetValueReaders.ReusableEntry;
 import org.apache.iceberg.parquet.ParquetValueWriter;
 import org.apache.iceberg.parquet.ParquetValueWriters;
@@ -45,6 +45,7 @@ import org.apache.iceberg.parquet.VariantWriterBuilder;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.spark.SparkSchemaUtil;
+import org.apache.iceberg.types.EdgeAlgorithm;
 import org.apache.iceberg.types.TypeUtil;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.DecimalUtil;
@@ -54,6 +55,7 @@ import org.apache.iceberg.variants.VariantMetadata;
 import org.apache.iceberg.variants.VariantValue;
 import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.column.ColumnWriteStore;
+import org.apache.parquet.column.schema.EdgeInterpolationAlgorithm;
 import org.apache.parquet.io.api.Binary;
 import org.apache.parquet.schema.GroupType;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
@@ -293,7 +295,13 @@ public class SparkParquetWriters {
       @Override
       public Optional<ParquetValueWriter<?>> visit(
           LogicalTypeAnnotation.GeographyLogicalTypeAnnotation geographyLogicalType) {
-        return Optional.of(new GeographyWriter(desc));
+        EdgeInterpolationAlgorithm algorithm = geographyLogicalType.getAlgorithm();
+        return Optional.of(
+            new GeographyWriter(
+                desc,
+                Types.GeographyType.of(
+                    geographyLogicalType.getCrs(),
+                    algorithm != null ? EdgeAlgorithm.fromName(algorithm.name()) : null)));
       }
     }
 
@@ -536,17 +544,18 @@ public class SparkParquetWriters {
   }
 
   private static class GeographyWriter extends GeospatialWriter {
-    private final ValueSizeFieldMetrics.Builder metricsBuilder;
+    private final GeographyFieldMetrics.Builder metricsBuilder;
 
-    private GeographyWriter(ColumnDescriptor desc) {
+    private GeographyWriter(ColumnDescriptor desc, Types.GeographyType geographyType) {
       super(desc);
       this.metricsBuilder =
-          new ValueSizeFieldMetrics.Builder(desc.getPrimitiveType().getId().intValue());
+          new GeographyFieldMetrics.Builder(
+              desc.getPrimitiveType().getId().intValue(), geographyType);
     }
 
     @Override
     protected void updateMetrics(byte[] wkb) {
-      metricsBuilder.addValueSize(wkb.length);
+      metricsBuilder.addValue(ByteBuffer.wrap(wkb));
     }
 
     @Override
