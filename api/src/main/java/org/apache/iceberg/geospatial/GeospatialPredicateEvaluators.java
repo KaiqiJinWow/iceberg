@@ -122,6 +122,12 @@ public class GeospatialPredicateEvaluators {
         return false;
       }
 
+      // Every longitude at the same pole represents the same location.
+      if ((bbox1.max().y() == 90.0d && bbox2.max().y() == 90.0d)
+          || (bbox1.min().y() == -90.0d && bbox2.min().y() == -90.0d)) {
+        return true;
+      }
+
       // Check X dimension (longitude/easting) - with wrap-around
       return rangeIntersectsWithWrapAround(
           bbox1.min().x(), bbox1.max().x(), bbox2.min().x(), bbox2.max().x());
@@ -172,8 +178,10 @@ public class GeospatialPredicateEvaluators {
       boolean interval2WrapsAround = min2 > max2;
 
       if (!interval1WrapsAround && !interval2WrapsAround) {
-        // No wrap-around in either interval - use regular intersection
-        return rangeIntersects(min1, max1, min2, max2);
+        // The two representations of the antimeridian share the same boundary.
+        return rangeIntersects(min1, max1, min2, max2)
+            || (min1 == -180.0d && max2 == 180.0d)
+            || (min2 == -180.0d && max1 == 180.0d);
       } else if (interval1WrapsAround && interval2WrapsAround) {
         // Both intervals wrap around - they must intersect somewhere
         return true;

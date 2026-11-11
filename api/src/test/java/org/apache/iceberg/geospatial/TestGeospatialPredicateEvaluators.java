@@ -21,10 +21,16 @@ package org.apache.iceberg.geospatial;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.util.stream.Stream;
 import org.apache.iceberg.types.EdgeAlgorithm;
 import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 public class TestGeospatialPredicateEvaluators {
 
@@ -427,9 +433,9 @@ public class TestGeospatialPredicateEvaluators {
     GeospatialBound max2 = GeospatialBound.createXY(180.0, 10.0);
     BoundingBox box2 = new BoundingBox(min2, max2);
 
-    // These boxes should not intersect
-    assertThat(evaluator.intersects(box1, box2)).isFalse();
-    assertThat(evaluator.intersects(box2, box1)).isFalse();
+    // Both closed boxes include the antimeridian, represented as -180 or +180.
+    assertThat(evaluator.intersects(box1, box2)).isTrue();
+    assertThat(evaluator.intersects(box2, box1)).isTrue();
 
     // Box that wraps around the antimeridian, touching -180 and 180
     GeospatialBound min3 = GeospatialBound.createXY(180.0, 0.0);
@@ -441,6 +447,125 @@ public class TestGeospatialPredicateEvaluators {
     assertThat(evaluator.intersects(box3, box1)).isTrue();
     assertThat(evaluator.intersects(box2, box3)).isTrue();
     assertThat(evaluator.intersects(box3, box2)).isTrue();
+  }
+
+  @ParameterizedTest
+  @MethodSource("equivalentGeographyCoordinates")
+  void intersectsEquivalentGeographyPoints(double longitude1, double longitude2, double latitude) {
+    GeospatialPredicateEvaluators.GeographyEvaluator evaluator =
+        new GeospatialPredicateEvaluators.GeographyEvaluator();
+    GeospatialBound point1 = GeospatialBound.createXY(longitude1, latitude);
+    GeospatialBound point2 = GeospatialBound.createXY(longitude2, latitude);
+    BoundingBox box1 = new BoundingBox(point1, point1);
+    BoundingBox box2 = new BoundingBox(point2, point2);
+
+    assertThat(evaluator.intersects(box1, box2)).isTrue();
+    assertThat(evaluator.intersects(box2, box1)).isTrue();
+  }
+
+  @ParameterizedTest
+  @CsvSource({"80, 90", "-90, -80"})
+  void intersectsBoxesSharingAPole(double south, double north) {
+    GeospatialPredicateEvaluators.GeographyEvaluator evaluator =
+        new GeospatialPredicateEvaluators.GeographyEvaluator();
+    BoundingBox box1 =
+        new BoundingBox(GeospatialBound.createXY(10, south), GeospatialBound.createXY(20, north));
+    BoundingBox box2 =
+        new BoundingBox(GeospatialBound.createXY(40, south), GeospatialBound.createXY(50, north));
+
+    assertThat(evaluator.intersects(box1, box2)).isTrue();
+    assertThat(evaluator.intersects(box2, box1)).isTrue();
+  }
+
+  @ParameterizedTest
+  @ValueSource(doubles = {89.999, -89.999})
+  void separatesLongitudesNearAPole(double latitude) {
+    GeospatialPredicateEvaluators.GeographyEvaluator evaluator =
+        new GeospatialPredicateEvaluators.GeographyEvaluator();
+    GeospatialBound point1 = GeospatialBound.createXY(10, latitude);
+    GeospatialBound point2 = GeospatialBound.createXY(40, latitude);
+    BoundingBox box1 = new BoundingBox(point1, point1);
+    BoundingBox box2 = new BoundingBox(point2, point2);
+
+    assertThat(evaluator.intersects(box1, box2)).isFalse();
+    assertThat(evaluator.intersects(box2, box1)).isFalse();
+  }
+
+  @ParameterizedTest
+  @CsvSource({"-180, 179.999", "180, -179.999"})
+  void separatesLongitudesNearAntimeridian(double longitude1, double longitude2) {
+    GeospatialPredicateEvaluators.GeographyEvaluator evaluator =
+        new GeospatialPredicateEvaluators.GeographyEvaluator();
+    GeospatialBound point1 = GeospatialBound.createXY(longitude1, 10);
+    GeospatialBound point2 = GeospatialBound.createXY(longitude2, 10);
+    BoundingBox box1 = new BoundingBox(point1, point1);
+    BoundingBox box2 = new BoundingBox(point2, point2);
+
+    assertThat(evaluator.intersects(box1, box2)).isFalse();
+    assertThat(evaluator.intersects(box2, box1)).isFalse();
+  }
+
+  @Test
+  void separatesLatitudesAtAntimeridian() {
+    GeospatialPredicateEvaluators.GeographyEvaluator evaluator =
+        new GeospatialPredicateEvaluators.GeographyEvaluator();
+    GeospatialBound point1 = GeospatialBound.createXY(-180, 10);
+    GeospatialBound point2 = GeospatialBound.createXY(180, 20);
+    BoundingBox box1 = new BoundingBox(point1, point1);
+    BoundingBox box2 = new BoundingBox(point2, point2);
+
+    assertThat(evaluator.intersects(box1, box2)).isFalse();
+    assertThat(evaluator.intersects(box2, box1)).isFalse();
+  }
+
+  @ParameterizedTest
+  @MethodSource("equivalentGeographyCoordinates")
+  void separatesZAtEquivalentGeographyPoints(
+      double longitude1, double longitude2, double latitude) {
+    GeospatialPredicateEvaluators.GeographyEvaluator evaluator =
+        new GeospatialPredicateEvaluators.GeographyEvaluator();
+    GeospatialBound point1 = GeospatialBound.createXYZ(longitude1, latitude, 10);
+    GeospatialBound point2 = GeospatialBound.createXYZ(longitude2, latitude, 20);
+    BoundingBox box1 = new BoundingBox(point1, point1);
+    BoundingBox box2 = new BoundingBox(point2, point2);
+
+    assertThat(evaluator.intersects(box1, box2)).isFalse();
+    assertThat(evaluator.intersects(box2, box1)).isFalse();
+  }
+
+  @ParameterizedTest
+  @MethodSource("equivalentGeographyCoordinates")
+  void separatesMAtEquivalentGeographyPoints(
+      double longitude1, double longitude2, double latitude) {
+    GeospatialPredicateEvaluators.GeographyEvaluator evaluator =
+        new GeospatialPredicateEvaluators.GeographyEvaluator();
+    GeospatialBound point1 = GeospatialBound.createXYM(longitude1, latitude, 10);
+    GeospatialBound point2 = GeospatialBound.createXYM(longitude2, latitude, 20);
+    BoundingBox box1 = new BoundingBox(point1, point1);
+    BoundingBox box2 = new BoundingBox(point2, point2);
+
+    assertThat(evaluator.intersects(box1, box2)).isFalse();
+    assertThat(evaluator.intersects(box2, box1)).isFalse();
+  }
+
+  @ParameterizedTest
+  @MethodSource("equivalentGeographyCoordinates")
+  void ignoresMissingDimensionsAtEquivalentGeographyPoints(
+      double longitude1, double longitude2, double latitude) {
+    GeospatialPredicateEvaluators.GeographyEvaluator evaluator =
+        new GeospatialPredicateEvaluators.GeographyEvaluator();
+    GeospatialBound point1 = GeospatialBound.createXY(longitude1, latitude);
+    GeospatialBound point2 = GeospatialBound.createXYZM(longitude2, latitude, 10, 20);
+    BoundingBox box1 = new BoundingBox(point1, point1);
+    BoundingBox box2 = new BoundingBox(point2, point2);
+
+    assertThat(evaluator.intersects(box1, box2)).isTrue();
+    assertThat(evaluator.intersects(box2, box1)).isTrue();
+  }
+
+  private static Stream<Arguments> equivalentGeographyCoordinates() {
+    return Stream.of(
+        Arguments.of(-120, 40, 90), Arguments.of(-120, 40, -90), Arguments.of(-180, 180, 10));
   }
 
   @Test
