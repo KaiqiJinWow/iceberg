@@ -27,6 +27,7 @@ import org.apache.iceberg.geospatial.GeospatialBound;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -172,10 +173,18 @@ class TestSphericalGeographyBoundsBuilder {
   }
 
   @ParameterizedTest
-  @ValueSource(doubles = {60.0, -60.0, 1e-4, -1e-4})
-  void coversPoleInsideResolvedMinorArc(double latitude) {
+  @CsvSource({
+    "0.0, 60.0",
+    "0.0, -60.0",
+    "0.0, 1e-4",
+    "0.0, -1e-4",
+    "-45.7, 60.0",
+    "-45.7, -60.0",
+    "-10.1, 30.0"
+  })
+  void coversPoleInsideResolvedMinorArc(double longitude, double latitude) {
     SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
-    bounds.addEdge(0.0, latitude, 180.0, latitude);
+    bounds.addEdge(longitude, latitude, longitude + 180.0, latitude);
     double south = latitude < 0.0 ? -90.0 : latitude;
     double north = latitude > 0.0 ? 90.0 : latitude;
 
@@ -194,18 +203,20 @@ class TestSphericalGeographyBoundsBuilder {
     assertThat(box.max().y()).isBetween(60.0, 60.001);
   }
 
-  @Test
-  void coversNearlyEquatorialLatitudeExtremum() {
+  @ParameterizedTest
+  @ValueSource(doubles = {1e-15, -1e-15, 1e-10, -1e-10, 1e-6, -1e-6})
+  void coversNearlyEquatorialLatitudeExtremum(double latitude) {
     SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
-    double latitude = 1e-10;
     bounds.addEdge(-45.0, latitude, 45.0, latitude);
 
-    // The midpoint is the northern vertex for endpoints symmetric about the prime meridian.
+    // Equal-latitude endpoints reach their latitude extremum at the arc midpoint.
     double midpointLatitude =
         Math.toDegrees(Math.atan(Math.tan(Math.toRadians(latitude)) / Math.cos(Math.PI / 4.0)));
     BoundingBox box = bounds.build();
-    assertThat(box.min().y()).isEqualTo(latitude);
-    assertThat(box.max().y()).isGreaterThanOrEqualTo(midpointLatitude).isLessThan(1e-5);
+    double south = Math.min(latitude, midpointLatitude);
+    double north = Math.max(latitude, midpointLatitude);
+    assertThat(box.min().y()).isBetween(south - 1e-5, south);
+    assertThat(box.max().y()).isBetween(north, north + 1e-5);
   }
 
   @ParameterizedTest
