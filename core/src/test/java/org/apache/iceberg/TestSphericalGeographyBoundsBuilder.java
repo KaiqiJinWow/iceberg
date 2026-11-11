@@ -27,6 +27,7 @@ import org.apache.iceberg.geospatial.GeospatialBound;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -95,26 +96,68 @@ class TestSphericalGeographyBoundsBuilder {
   }
 
   @Test
-  void includesPoleLongitudeWithFinitePoints() {
+  void ignoresPoleLongitudeWithFinitePoints() {
     SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
     bounds.addPoint(-120.0, 90.0);
     bounds.addPoint(40.0, 10.0);
 
     BoundingBox box = bounds.build();
-    assertThat(box.min()).isEqualTo(GeospatialBound.createXY(-120.0, 10.0));
+    assertThat(box.min()).isEqualTo(GeospatialBound.createXY(40.0, 10.0));
     assertThat(box.max()).isEqualTo(GeospatialBound.createXY(40.0, 90.0));
   }
 
-  @Test
-  void usesStoredLongitudeForPoleOnlyBounds() {
+  @ParameterizedTest
+  @ValueSource(doubles = {-90.0, 90.0})
+  void poleOnlyPointsHaveNoBounds(double latitude) {
     SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
-    bounds.addPoint(10.0, 90.0);
-    bounds.addPoint(-50.0, 90.0);
+    bounds.addPoint(10.0, latitude);
+    bounds.addPoint(-50.0, latitude);
 
-    assertThat(bounds.build())
-        .isEqualTo(
-            new BoundingBox(
-                GeospatialBound.createXY(-50.0, 90.0), GeospatialBound.createXY(10.0, 90.0)));
+    assertThat(bounds.build()).isNull();
+  }
+
+  @Test
+  void buildingPoleOnlyBoundsDoesNotWidenLaterPoints() {
+    SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
+    bounds.addPoint(-120.0, 90.0);
+    assertThat(bounds.build()).isNull();
+    assertThat(bounds.build()).isNull();
+
+    bounds.addPoint(40.0, 10.0);
+
+    assertThat(bounds.build()).isEqualTo(box(40.0, 10.0, 40.0, 90.0));
+  }
+
+  @Test
+  void retainsBothPoleLatitudesForLaterPoints() {
+    SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
+    bounds.addPoint(-120.0, 90.0);
+    bounds.addPoint(50.0, -90.0);
+    assertThat(bounds.build()).isNull();
+    assertThat(bounds.build()).isNull();
+
+    bounds.addPoint(40.0, 10.0);
+
+    assertThat(bounds.build()).isEqualTo(box(40.0, -90.0, 40.0, 90.0));
+    assertThat(bounds.build()).isEqualTo(box(40.0, -90.0, 40.0, 90.0));
+  }
+
+  @ParameterizedTest
+  @ValueSource(doubles = {-90.0, 90.0})
+  void poleWithMissingLongitudePermanentlySuppressesBounds(double latitude) {
+    SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
+    bounds.addPoint(Double.NaN, latitude);
+
+    assertBoundsCannotBeRestored(bounds);
+  }
+
+  @Test
+  void ignoresPoleLongitudeWhenFirstVertexIsAddedBeforeEdge() {
+    SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
+    bounds.addPoint(-120.0, 90.0);
+    bounds.addEdge(-120.0, 90.0, 40.0, 10.0);
+
+    assertThat(bounds.build()).isEqualTo(box(40.0, 10.0, 40.0, 90.0));
   }
 
   @Test
@@ -151,11 +194,19 @@ class TestSphericalGeographyBoundsBuilder {
   }
 
   @Test
-  void preservesBothStoredAntimeridianLongitudesForCoincidentEndpoints() {
+  void normalizesAntimeridianLongitudesForCoincidentEndpoints() {
     SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
     bounds.addEdge(-180.0, 30.0, 180.0, 30.0);
 
-    assertThat(bounds.build()).isEqualTo(box(180.0, 30.0, -180.0, 30.0));
+    assertThat(bounds.build()).isEqualTo(box(-180.0, 30.0, -180.0, 30.0));
+  }
+
+  @Test
+  void normalizesAntimeridianEdgeLongitude() {
+    SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
+    bounds.addEdge(180.0, 20.0, 180.0, 30.0);
+
+    assertThat(bounds.build()).isEqualTo(box(-180.0, 20.0, -180.0, 30.0));
   }
 
   @Test
@@ -172,10 +223,18 @@ class TestSphericalGeographyBoundsBuilder {
   }
 
   @ParameterizedTest
-  @ValueSource(doubles = {60.0, -60.0, 1e-4, -1e-4})
-  void coversPoleInsideResolvedMinorArc(double latitude) {
+  @CsvSource({
+    "0.0, 60.0",
+    "0.0, -60.0",
+    "0.0, 1e-4",
+    "0.0, -1e-4",
+    "-45.7, 60.0",
+    "-45.7, -60.0",
+    "-10.1, 30.0"
+  })
+  void coversPoleInsideResolvedMinorArc(double longitude, double latitude) {
     SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
-    bounds.addEdge(0.0, latitude, 180.0, latitude);
+    bounds.addEdge(longitude, latitude, longitude + 180.0, latitude);
     double south = latitude < 0.0 ? -90.0 : latitude;
     double north = latitude > 0.0 ? 90.0 : latitude;
 
@@ -194,18 +253,49 @@ class TestSphericalGeographyBoundsBuilder {
     assertThat(box.max().y()).isBetween(60.0, 60.001);
   }
 
-  @Test
-  void coversNearlyEquatorialLatitudeExtremum() {
+  @ParameterizedTest
+  @ValueSource(doubles = {1e-15, -1e-15, 1e-10, -1e-10, 1e-6, -1e-6})
+  void coversNearlyEquatorialLatitudeExtremum(double latitude) {
     SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
-    double latitude = 1e-10;
     bounds.addEdge(-45.0, latitude, 45.0, latitude);
 
-    // The midpoint is the northern vertex for endpoints symmetric about the prime meridian.
+    // Equal-latitude endpoints reach their latitude extremum at the arc midpoint.
     double midpointLatitude =
         Math.toDegrees(Math.atan(Math.tan(Math.toRadians(latitude)) / Math.cos(Math.PI / 4.0)));
     BoundingBox box = bounds.build();
-    assertThat(box.min().y()).isEqualTo(latitude);
-    assertThat(box.max().y()).isGreaterThanOrEqualTo(midpointLatitude).isLessThan(1e-5);
+    double south = Math.min(latitude, midpointLatitude);
+    double north = Math.max(latitude, midpointLatitude);
+    assertThat(box.min().y()).isBetween(south - 1e-12, south);
+    assertThat(box.max().y()).isBetween(north, north + 1e-12);
+  }
+
+  @ParameterizedTest
+  @ValueSource(doubles = {1e-320, -1e-320})
+  void coversLatitudeExtremaWhenRadianConversionUnderflows(double latitude) {
+    SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
+    bounds.addEdge(-45.0, latitude, 45.0, latitude);
+
+    // At this scale, tan(latitude) and atan(latitude) equal latitude to double precision.
+    double midpointLatitude = latitude / Math.cos(Math.PI / 4.0);
+    BoundingBox box = bounds.build();
+    assertThat(box.min().y()).isLessThanOrEqualTo(Math.min(latitude, midpointLatitude));
+    assertThat(box.max().y()).isGreaterThanOrEqualTo(Math.max(latitude, midpointLatitude));
+  }
+
+  @ParameterizedTest
+  @ValueSource(doubles = {1e-8, -1e-8})
+  void coversIllConditionedNearlyAntipodalExtremum(double latitude) {
+    double longitude = 89.99999999;
+    SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
+    bounds.addEdge(-longitude, latitude, longitude, latitude);
+
+    double midpointLatitude =
+        Math.toDegrees(
+            Math.atan2(
+                Math.tan(Math.toRadians(latitude)), Math.sin(Math.toRadians(90.0 - longitude))));
+    BoundingBox box = bounds.build();
+    assertThat(box.min().y()).isLessThanOrEqualTo(Math.min(latitude, midpointLatitude));
+    assertThat(box.max().y()).isGreaterThanOrEqualTo(Math.max(latitude, midpointLatitude));
   }
 
   @ParameterizedTest
@@ -302,20 +392,80 @@ class TestSphericalGeographyBoundsBuilder {
     bounds.addPoint(0.0, 0.0);
     bounds.addPoint(longitude, latitude);
 
-    assertThat(bounds.build()).isNull();
+    assertBoundsCannotBeRestored(bounds);
+  }
+
+  @ParameterizedTest
+  @CsvSource({"NaN, 10.0", "20.0, NaN"})
+  void partialCoordinateSuppressesLaterBounds(double longitude, double latitude) {
+    SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
+    bounds.addPoint(longitude, latitude);
+
+    assertBoundsCannotBeRestored(bounds);
+  }
+
+  @ParameterizedTest
+  @CsvSource({"NaN, 10.0", "20.0, NaN"})
+  void partialCoordinateSuppressesWorldBounds(double longitude, double latitude) {
+    SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
+    bounds.addWorld();
+    bounds.addPoint(longitude, latitude);
+
+    assertBoundsCannotBeRestored(bounds);
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("incompleteEdges")
+  void incompleteEdgeSuppressesLaterBounds(
+      String description,
+      double longitude1,
+      double latitude1,
+      double longitude2,
+      double latitude2) {
+    SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
+    bounds.addEdge(longitude1, latitude1, longitude2, latitude2);
+
+    assertBoundsCannotBeRestored(bounds);
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("incompleteEdges")
+  void incompleteEdgeSuppressesExistingBounds(
+      String description,
+      double longitude1,
+      double latitude1,
+      double longitude2,
+      double latitude2) {
+    SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
+    bounds.addPoint(0.0, 0.0);
+    bounds.addEdge(longitude1, latitude1, longitude2, latitude2);
+
+    assertBoundsCannotBeRestored(bounds);
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("incompleteEdges")
+  void incompleteEdgeSuppressesWorldBounds(
+      String description,
+      double longitude1,
+      double latitude1,
+      double longitude2,
+      double latitude2) {
+    SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
+    bounds.addWorld();
+    bounds.addEdge(longitude1, latitude1, longitude2, latitude2);
+
+    assertBoundsCannotBeRestored(bounds);
   }
 
   @Test
-  void skipsNaNOrdinatesWithoutSuppressingBounds() {
+  void emptyPointsDoNotSuppressBounds() {
     SphericalGeographyBoundsBuilder bounds = new SphericalGeographyBoundsBuilder();
-    bounds.addPoint(0.0, 0.0);
     bounds.addPoint(Double.NaN, Double.NaN);
-    bounds.addPoint(Double.NaN, 10.0);
-    bounds.addPoint(20.0, Double.NaN);
+    bounds.addPoint(20.0, 10.0);
+    bounds.addPoint(Double.NaN, Double.NaN);
 
-    BoundingBox box = bounds.build();
-    assertThat(box.min()).isEqualTo(GeospatialBound.createXY(0.0, 0.0));
-    assertThat(box.max()).isEqualTo(GeospatialBound.createXY(20.0, 10.0));
+    assertThat(bounds.build()).isEqualTo(box(20.0, 10.0, 20.0, 10.0));
   }
 
   @Test
@@ -424,7 +574,21 @@ class TestSphericalGeographyBoundsBuilder {
         Arguments.of("latitude above range", 0.0, 90.1),
         Arguments.of("latitude below range", 0.0, -90.1),
         Arguments.of("infinite longitude", Double.POSITIVE_INFINITY, 0.0),
-        Arguments.of("infinite latitude", 0.0, Double.NEGATIVE_INFINITY));
+        Arguments.of("infinite latitude", 0.0, Double.NEGATIVE_INFINITY),
+        Arguments.of("invalid longitude at a pole", 181.0, 90.0),
+        Arguments.of("missing longitude", Double.NaN, 10.0),
+        Arguments.of("missing latitude", 20.0, Double.NaN));
+  }
+
+  private static Stream<Arguments> incompleteEdges() {
+    return Stream.of(
+        Arguments.of("missing start longitude", Double.NaN, 10.0, 20.0, 20.0),
+        Arguments.of("missing start latitude", 0.0, Double.NaN, 20.0, 20.0),
+        Arguments.of("missing end longitude", 0.0, 10.0, Double.NaN, 20.0),
+        Arguments.of("missing end latitude", 0.0, 10.0, 20.0, Double.NaN),
+        Arguments.of("empty start point", Double.NaN, Double.NaN, 20.0, 20.0),
+        Arguments.of("empty end point", 0.0, 10.0, Double.NaN, Double.NaN),
+        Arguments.of("empty endpoints", Double.NaN, Double.NaN, Double.NaN, Double.NaN));
   }
 
   private static Stream<Arguments> lineBoundsCases() {
@@ -478,11 +642,11 @@ class TestSphericalGeographyBoundsBuilder {
         Arguments.of(
             "line stays on north pole",
             new double[][] {{20.0, 90.0}, {10.0, 90.0}, {30.0, 90.0}},
-            box(10.0, 90.0, 30.0, 90.0)),
+            null),
         Arguments.of(
             "line stays on south pole",
             new double[][] {{20.0, -90.0}, {10.0, -90.0}, {30.0, -90.0}},
-            box(10.0, -90.0, 30.0, -90.0)),
+            null),
         Arguments.of(
             "edge connects opposite poles",
             new double[][] {{30.0, 90.0}, {10.0, -90.0}},
@@ -510,10 +674,10 @@ class TestSphericalGeographyBoundsBuilder {
         edgeCase(-170.0, -10.0, 160.0, -10.0, 160.0, -10.34527004615, -170.0, -10.0),
         edgeCase(-180.0, 10.0, -170.0, 10.0, -180.0, 10.0, -170.0, 10.0374230459107),
         edgeCase(180.0, 10.0, 170.0, 10.0, 170.0, 10.0, 180.0, 10.0374230459107),
-        edgeCase(180.0, 10.0, 180.0, 5.0, 180.0, 5.0, 180.0, 10.0),
+        edgeCase(180.0, 10.0, 180.0, 5.0, -180.0, 5.0, -180.0, 10.0),
         edgeCase(-180.0, 10.0, -180.0, 5.0, -180.0, 5.0, -180.0, 10.0),
-        edgeCase(10.0, 90.0, 20.0, 90.0, 10.0, 90.0, 20.0, 90.0),
-        edgeCase(10.0, -90.0, 20.0, -90.0, 10.0, -90.0, 20.0, -90.0));
+        Arguments.of(10.0, 90.0, 20.0, 90.0, null),
+        Arguments.of(10.0, -90.0, 20.0, -90.0, null));
   }
 
   private static Stream<Arguments> latitudeEdgeBoundsCases() {
@@ -531,8 +695,10 @@ class TestSphericalGeographyBoundsBuilder {
         edgeCase(5.0, 10.0, 175.0, 10.0, 5.0, 10.0, 175.0, 63.6975136546575),
         edgeCase(10.0, 20.0, 10.0, 90.0, 10.0, 20.0, 10.0, 90.0),
         edgeCase(10.0, 20.0, 10.0, -90.0, 10.0, -90.0, 10.0, 20.0),
-        edgeCase(10.0, -20.0, -10.0, 90.0, -10.0, -20.0, 10.0, 90.0),
-        edgeCase(10.0, -20.0, -10.0, -90.0, -10.0, -90.0, 10.0, -20.0));
+        edgeCase(180.0, 90.0, 180.0, 20.0, 180.0, 20.0, 180.0, 90.0),
+        edgeCase(180.0, -90.0, -180.0, 20.0, -180.0, -90.0, -180.0, 20.0),
+        edgeCase(10.0, -20.0, -10.0, 90.0, 10.0, -20.0, 10.0, 90.0),
+        edgeCase(10.0, -20.0, -10.0, -90.0, 10.0, -90.0, 10.0, -20.0));
   }
 
   private static Stream<Arguments> pointBoundsCases() {
@@ -569,11 +735,9 @@ class TestSphericalGeographyBoundsBuilder {
         Arguments.of(
             "points stay on north pole",
             new double[][] {{20.0, 90.0}, {10.0, 90.0}, {30.0, 90.0}},
-            box(10.0, 90.0, 30.0, 90.0)),
+            null),
         Arguments.of(
-            "points include both poles",
-            new double[][] {{10.0, 90.0}, {30.0, -90.0}},
-            box(10.0, -90.0, 30.0, 90.0)),
+            "points include both poles", new double[][] {{10.0, 90.0}, {30.0, -90.0}}, null),
         Arguments.of(
             "pole longitudes do not widen finite points",
             new double[][] {{10.0, 90.0}, {10.0, 0.0}, {10.0, -90.0}, {20.0, 0.0}, {20.0, 90.0}},
@@ -594,12 +758,31 @@ class TestSphericalGeographyBoundsBuilder {
   }
 
   private static void assertBoundsCloseTo(BoundingBox actual, BoundingBox expected) {
+    if (expected == null) {
+      assertThat(actual).isNull();
+      return;
+    }
+
     assertThat(actual).isNotNull();
     assertThat(actual.min().x()).isEqualTo(expected.min().x());
     assertThat(actual.max().x()).isEqualTo(expected.max().x());
     // Latitude extrema are conservatively widened, so assert coverage rather than exact values.
     assertThat(actual.min().y()).isLessThanOrEqualTo(expected.min().y() + LATITUDE_TOLERANCE);
     assertThat(actual.max().y()).isGreaterThanOrEqualTo(expected.max().y() - LATITUDE_TOLERANCE);
+  }
+
+  private static void assertBoundsCannotBeRestored(SphericalGeographyBoundsBuilder bounds) {
+    assertThat(bounds.build()).isNull();
+    assertThat(bounds.build()).isNull();
+
+    bounds.addPoint(40.0, 20.0);
+    assertThat(bounds.build()).isNull();
+
+    bounds.addEdge(40.0, 20.0, 50.0, 30.0);
+    assertThat(bounds.build()).isNull();
+
+    bounds.addWorld();
+    assertThat(bounds.build()).isNull();
   }
 
   private static Arguments edgeCase(
