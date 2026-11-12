@@ -28,8 +28,10 @@ import org.apache.iceberg.parquet.TypeWithSchemaVisitor;
 import org.apache.iceberg.parquet.VariantWriterBuilder;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.types.EdgeAlgorithm;
 import org.apache.iceberg.types.Types;
 import org.apache.parquet.column.ColumnDescriptor;
+import org.apache.parquet.column.schema.EdgeInterpolationAlgorithm;
 import org.apache.parquet.schema.GroupType;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.MessageType;
@@ -277,7 +279,13 @@ abstract class BaseParquetWriter<T> {
     public Optional<ParquetValueWriter<?>> visit(
         LogicalTypeAnnotation.GeographyLogicalTypeAnnotation geographyType) {
       // geography values are pure WKB stored in a BINARY column
-      return Optional.of(ParquetValueWriters.geospatial(desc));
+      EdgeInterpolationAlgorithm algorithm = geographyType.getAlgorithm();
+      return Optional.of(
+          ParquetValueWriters.geography(
+              desc,
+              Types.GeographyType.of(
+                  geographyType.getCrs(),
+                  algorithm != null ? EdgeAlgorithm.fromName(algorithm.name()) : null)));
     }
 
     @Override

@@ -36,6 +36,7 @@ import org.apache.avro.util.Utf8;
 import org.apache.iceberg.DoubleFieldMetrics;
 import org.apache.iceberg.FieldMetrics;
 import org.apache.iceberg.FloatFieldMetrics;
+import org.apache.iceberg.GeographyFieldMetrics;
 import org.apache.iceberg.GeometryFieldMetrics;
 import org.apache.iceberg.StructLike;
 import org.apache.iceberg.ValueSizeFieldMetrics;
@@ -129,6 +130,12 @@ public class ParquetValueWriters {
   public static PrimitiveWriter<ByteBuffer> geometry(
       ColumnDescriptor desc, org.apache.iceberg.types.Type geometryType) {
     return new GeometryWriter(desc, geometryType);
+  }
+
+  /** Creates a WKB writer that collects geography counts, byte sizes, and available bounds. */
+  public static PrimitiveWriter<ByteBuffer> geography(
+      ColumnDescriptor desc, Types.GeographyType geographyType) {
+    return new GeographyWriter(desc, geographyType);
   }
 
   public static PrimitiveWriter<ByteBuffer> fixedBuffers(ColumnDescriptor desc) {
@@ -382,6 +389,28 @@ public class ParquetValueWriters {
     public void write(int repetitionLevel, ByteBuffer buffer) {
       // Accumulate the bounding box before writing, so it reads the buffer's coordinates while the
       // position is intact (the scanner reads a duplicate and leaves this buffer untouched).
+      metricsBuilder.addValue(buffer);
+      column.writeBinary(repetitionLevel, Binary.fromReusedByteBuffer(buffer));
+    }
+
+    @Override
+    public Stream<FieldMetrics<?>> metrics() {
+      return Stream.of(metricsBuilder.build());
+    }
+  }
+
+  private static class GeographyWriter extends PrimitiveWriter<ByteBuffer> {
+    private final GeographyFieldMetrics.Builder metricsBuilder;
+
+    private GeographyWriter(ColumnDescriptor desc, Types.GeographyType geographyType) {
+      super(desc);
+      this.metricsBuilder =
+          new GeographyFieldMetrics.Builder(
+              desc.getPrimitiveType().getId().intValue(), geographyType);
+    }
+
+    @Override
+    public void write(int repetitionLevel, ByteBuffer buffer) {
       metricsBuilder.addValue(buffer);
       column.writeBinary(repetitionLevel, Binary.fromReusedByteBuffer(buffer));
     }

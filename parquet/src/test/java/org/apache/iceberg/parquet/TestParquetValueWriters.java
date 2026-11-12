@@ -40,6 +40,7 @@ import org.apache.iceberg.data.parquet.GenericParquetWriter;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.types.EdgeAlgorithm;
 import org.apache.iceberg.types.Types;
 import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.column.ColumnWriteStore;
@@ -47,6 +48,8 @@ import org.apache.parquet.column.ColumnWriter;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.Type;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 class TestParquetValueWriters {
 
@@ -59,6 +62,18 @@ class TestParquetValueWriters {
 
     FieldMetrics<?> metrics = writer.metrics().findFirst().orElseThrow();
     assertThat(metrics.originalType()).isEqualTo(geometryType);
+  }
+
+  @ParameterizedTest
+  @EnumSource(EdgeAlgorithm.class)
+  void geographyWriterUsesParquetCRSAndAlgorithm(EdgeAlgorithm algorithm) {
+    Types.GeographyType geographyType = Types.GeographyType.of("EPSG:4326", algorithm);
+    Schema schema = new Schema(optional(2, "geog", geographyType));
+    MessageType parquetSchema = ParquetSchemaUtil.convert(schema, "table");
+    ParquetValueWriter<Record> writer = GenericParquetWriter.create(schema, parquetSchema);
+
+    FieldMetrics<?> metrics = writer.metrics().findFirst().orElseThrow();
+    assertThat(metrics.originalType()).isEqualTo(geographyType);
   }
 
   @Test
@@ -86,7 +101,7 @@ class TestParquetValueWriters {
             ParquetValueWriters.floats(floatDesc),
             ParquetValueWriters.doubles(doubleDesc),
             ParquetValueWriters.geospatial(geometryDesc),
-            ParquetValueWriters.geospatial(geographyDesc));
+            ParquetValueWriters.geography(geographyDesc, Types.GeographyType.crs84()));
     ParquetValueWriter<StructLike> writer =
         ParquetValueWriters.option(
             parquetSchema.getType("stats"),
