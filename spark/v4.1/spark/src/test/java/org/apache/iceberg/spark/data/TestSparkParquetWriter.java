@@ -45,6 +45,8 @@ import org.apache.iceberg.FieldMetrics;
 import org.apache.iceberg.Files;
 import org.apache.iceberg.Metrics;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.data.Record;
+import org.apache.iceberg.data.parquet.GenericParquetReaders;
 import org.apache.iceberg.geospatial.GeospatialBound;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.FileAppender;
@@ -67,6 +69,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -281,6 +284,88 @@ public class TestSparkParquetWriter {
   }
 
   @ParameterizedTest
+  @CsvSource({"-45, 45, 60", "170, -170, 10"})
+  void sphericalGeographyBoundsMetrics(double west, double east, double latitude)
+      throws IOException {
+    Types.GeographyType geographyType = Types.GeographyType.crs84();
+    Schema schema = new Schema(optional(1, "geog", geographyType));
+    byte[] line = lineStringWkb(west, latitude, east, latitude);
+
+    Metrics metrics = writeMetrics(schema, geographyRow(line), geographyRow(null));
+
+    assertThat(metrics.recordCount()).isEqualTo(2L);
+    assertThat(metrics.valueCounts()).containsEntry(1, 2L);
+    assertThat(metrics.nullValueCounts()).containsEntry(1, 1L);
+    assertThat(metrics.totalBytes()).containsEntry(1, (long) line.length);
+    GeospatialBound lower = Conversions.fromByteBuffer(geographyType, metrics.lowerBounds().get(1));
+    GeospatialBound upper = Conversions.fromByteBuffer(geographyType, metrics.upperBounds().get(1));
+    assertThat(lower.x()).isEqualTo(west);
+    assertThat(upper.x()).isEqualTo(east);
+    assertThat(lower.y()).isLessThanOrEqualTo(latitude);
+    double span = east >= west ? east - west : east - west + 360.0;
+    double maximumLatitude =
+        Math.toDegrees(
+            Math.atan(Math.tan(Math.toRadians(latitude)) / Math.cos(Math.toRadians(span / 2))));
+    assertThat(upper.y()).isGreaterThanOrEqualTo(maximumLatitude);
+    assertThat(upper.y()).isLessThan(maximumLatitude + 1E-4);
+  }
+
+  @ParameterizedTest
+  @MethodSource("geometriesWithoutBounds")
+  void geographyMetricsHaveNoBounds(byte[] wkb, long expectedNullCount, long expectedTotalBytes)
+      throws IOException {
+    Schema schema = new Schema(optional(1, "geog", Types.GeographyType.crs84()));
+
+    Metrics metrics = writeMetrics(schema, geographyRow(wkb), geographyRow(wkb));
+
+    assertThat(metrics.recordCount()).isEqualTo(2L);
+    assertThat(metrics.valueCounts()).containsEntry(1, 2L);
+    assertThat(metrics.nullValueCounts()).containsEntry(1, expectedNullCount);
+    assertThat(metrics.totalBytes()).containsEntry(1, expectedTotalBytes);
+    assertThat(metrics.lowerBounds()).isEmpty();
+    assertThat(metrics.upperBounds()).isEmpty();
+  }
+
+  @Test
+  void optionalParentPreservesGeographyMetrics() throws IOException {
+    Types.GeographyType geographyType = Types.GeographyType.crs84();
+    Types.StructType locationType = Types.StructType.of(optional(2, "geog", geographyType));
+    Schema schema = new Schema(optional(1, "location", locationType));
+    byte[] line = lineStringWkb(170.0, 0.0, -170.0, 0.0);
+    InternalRow withGeography = new GenericInternalRow(new Object[] {geographyRow(line)});
+    InternalRow withNullChild = new GenericInternalRow(new Object[] {geographyRow(null)});
+    InternalRow withNullParent = new GenericInternalRow(1);
+
+    Metrics metrics = writeMetrics(schema, withGeography, withNullChild, withNullParent);
+
+    assertThat(metrics.recordCount()).isEqualTo(3L);
+    assertThat(metrics.valueCounts()).containsEntry(2, 3L);
+    assertThat(metrics.nullValueCounts()).containsEntry(2, 2L);
+    assertThat(metrics.totalBytes()).containsEntry(2, (long) line.length);
+    assertThat(
+            Conversions.<GeospatialBound>fromByteBuffer(
+                geographyType, metrics.lowerBounds().get(2)))
+        .isEqualTo(GeospatialBound.createXY(170.0, 0.0));
+    assertThat(
+            Conversions.<GeospatialBound>fromByteBuffer(
+                geographyType, metrics.upperBounds().get(2)))
+        .isEqualTo(GeospatialBound.createXY(-170.0, 0.0));
+
+    try (CloseableIterable<Record> reader =
+        Parquet.read(Files.localInput(temp.resolve("geometry.parquet").toFile()))
+            .project(schema)
+            .createReaderFunc(fileSchema -> GenericParquetReaders.buildReader(schema, fileSchema))
+            .build()) {
+      List<Record> rows = Lists.newArrayList(reader);
+      assertThat(rows).hasSize(3);
+      assertThat(((Record) rows.get(0).getField("location")).getField("geog"))
+          .isEqualTo(ByteBuffer.wrap(line));
+      assertThat(((Record) rows.get(1).getField("location")).getField("geog")).isNull();
+      assertThat(rows.get(2).getField("location")).isNull();
+    }
+  }
+
+  @ParameterizedTest
   @MethodSource("geometriesWithoutBounds")
   void geometryMetricsHaveNoBounds(byte[] wkb, long expectedNullCount, long expectedTotalBytes)
       throws IOException {
@@ -318,6 +403,10 @@ public class TestSparkParquetWriter {
     }
 
     return writer.metrics();
+  }
+
+  private static InternalRow geographyRow(byte[] wkb) {
+    return new GenericInternalRow(new Object[] {wkb == null ? null : STUtils.stGeogFromWKB(wkb)});
   }
 
   private static InternalRow geometryRow(byte[] wkb) {
